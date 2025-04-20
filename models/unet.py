@@ -7,7 +7,7 @@ import torch
 from torch import nn
 
 class Unet(nn.Module):
-    def __init__(self, model_config):
+    def __init__(self, model_config, use_up=True):
         super().__init__()
         im_channels = model_config['im_channels']          # for MNIST dataset, 1
         self.down_channels = model_config['down_channels'] # [32, 64, 128, 256]
@@ -42,13 +42,14 @@ class Unet(nn.Module):
             self.mids.append(MidBlock(self.mid_channels[i], self.mid_channels[i+1], self.t_emb_dim,
                                       num_layers=self.num_mid_layers))
         
-        self.ups = nn.ModuleList([])
-        for i in reversed(range(len(self.down_channels)-1)):
-            self.ups.append(UpBlock(self.down_channels[i] * 2, self.down_channels[i-1] if i != 0 else 16,
-                                    self.t_emb_dim, up_sample=self.down_sample[i], num_layers=self.num_up_layers))
-        
-        self.norm_out = nn.GroupNorm(8, 16)
-        self.conv_out = nn.Conv2d(16, im_channels, kernel_size=3, padding=1)
+        if use_up:
+            self.ups = nn.ModuleList([])
+            for i in reversed(range(len(self.down_channels)-1)):
+                self.ups.append(UpBlock(self.down_channels[i] * 2, self.down_channels[i-1] if i != 0 else 16,
+                                        self.t_emb_dim, up_sample=self.down_sample[i], num_layers=self.num_up_layers))
+            
+            self.norm_out = nn.GroupNorm(8, 16)
+            self.conv_out = nn.Conv2d(16, im_channels, kernel_size=3, padding=1)
     
     def forward(self, x, t):
         # Shapes assuming downblocks are [C1, C2, C3, C4]

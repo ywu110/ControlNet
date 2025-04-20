@@ -7,7 +7,7 @@ from tqdm import tqdm
 from torch.optim import Adam
 from dataset.mnist_dataset import MnistDataset
 from torch.utils.data import DataLoader
-from models.unet import Unet
+from models.control_net import ControlNet
 from scheduler.linear_noise_scheduler import LinearNoiseScheduler
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -18,9 +18,8 @@ def train(args):
     with open(args.config_path, 'r') as file:
         config = yaml.safe_load(file)
     print(config)
+    ########################
     
-    
-    # Load the parameters    
     diffusion_config = config['diffusion_params']
     dataset_config = config['dataset_params']
     model_config = config['model_params']
@@ -32,11 +31,14 @@ def train(args):
                                      beta_end=diffusion_config['beta_end'])
     
     # Create the dataset
-    mnist = MnistDataset('train', im_path=dataset_config['im_path'])
-    mnist_loader = DataLoader(mnist, batch_size=train_config['batch_size'], shuffle=True, num_workers=4)
-    
-    # Instantiate the model
-    model = Unet(model_config).to(device)
+    mnist = MnistDataset('train', im_path=dataset_config['im_path'], use_condition=True)
+    mnist_loader = DataLoader(mnist, batch_size=train_config['batch_size'], shuffle=True)
+
+    # Load model with checkpoint
+    model = ControlNet(model_config,
+                       model_locked=True,
+                       model_ckpt=os.path.join(train_config['task_name'], train_config['ddpm_ckpt_name']),
+                       device=device).to(device)
     model.train()
     
     # Create output directories
@@ -44,22 +46,27 @@ def train(args):
         os.mkdir(train_config['task_name'])
     
     # Load checkpoint if found
-    if os.path.exists(os.path.join(train_config['task_name'],train_config['ckpt_name'])):
+    if os.path.exists(os.path.join(train_config['task_name'], train_config['controlnet_ckpt_name'])):
         print('Loading checkpoint as found one')
         model.load_state_dict(torch.load(os.path.join(train_config['task_name'],
-                                                      train_config['ckpt_name']), map_location=device))
+                                                      train_config['controlnet_ckpt_name']),
+                                         map_location=device))
+
     # Specify training parameters
-    num_epochs = train_config['num_epochs']
-    optimizer = Adam(model.parameters(), lr=train_config['lr'])
+    num_epochs = train_config['controlnet_epochs']
+    optimizer = Adam(model.get_params(), lr=train_config['controlnet_lr'])
     criterion = torch.nn.MSELoss()
     
     # Run training
+    steps = 0
     for epoch_idx in range(num_epochs):
         losses = []
-        for im in tqdm(mnist_loader):
+        for im, condition in tqdm(mnist_loader):
             optimizer.zero_grad()
+
             im = im.float().to(device)
-            
+            condition = condition.float().to(device)
+
             # Sample random noise
             noise = torch.randn_like(im).to(device)
             
@@ -68,25 +75,27 @@ def train(args):
             
             # Add noise to images according to timestep
             noisy_im = scheduler.add_noise(im, noise, t)
-            noise_pred = model(noisy_im, t)
+
+            # Additionally start passing the condition to the model
+            noise_pred = model(noisy_im, t, condition)
 
             loss = criterion(noise_pred, noise)
             losses.append(loss.item())
             loss.backward()
             optimizer.step()
+            steps += 1
         print('Finished epoch:{} | Loss : {:.4f}'.format(
             epoch_idx + 1,
             np.mean(losses),
         ))
-        torch.save(model.state_dict(), os.path.join(train_config['task_name'],
-                                                    train_config['ckpt_name']))
-    
+
+    # Save the model
+    torch.save(model.state_dict(), os.path.join(train_config['task_name'], train_config['controlnet_ckpt_name']))    
     print('Done Training ...')
     
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Arguments for ddpm training')
-    parser.add_argument('--config', dest='config_path',
-                        default='config/default.yaml', type=str)
+    parser = argparse.ArgumentParser(description='Arguments for controlnet ddpm training')
+    parser.add_argument('--config', dest='config_path', default='config/mnist.yaml', type=str)
     args = parser.parse_args()
     train(args)
